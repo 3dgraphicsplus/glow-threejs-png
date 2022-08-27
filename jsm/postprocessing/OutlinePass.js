@@ -1,5 +1,8 @@
 import {
-	AdditiveBlending,
+	CustomBlending,
+	AddEquation,
+	SrcAlphaFactor,
+	OneMinusSrcAlphaFactor,
 	Color,
 	DoubleSide,
 	Matrix4,
@@ -10,7 +13,8 @@ import {
 	UniformsUtils,
 	Vector2,
 	Vector3,
-	WebGLRenderTarget
+	WebGLRenderTarget,
+	AdditiveBlending
 } from 'three';
 import { Pass, FullScreenQuad } from './Pass.js';
 import { CopyShader } from '../shaders/CopyShader.js';
@@ -24,12 +28,11 @@ class OutlinePass extends Pass {
 		this.renderScene = scene;
 		this.renderCamera = camera;
 		this.selectedObjects = selectedObjects !== undefined ? selectedObjects : [];
-		this.visibleEdgeColor = new Color( 1, 1, 1 );
-		this.hiddenEdgeColor = new Color( 0.1, 0.04, 0.02 );
-		this.edgeGlow = 0.0;
+		this.visibleEdgeColor = new Color( 1, 0, 0 );
+		this.edgeGlow = 1.0;
 		this.usePatternTexture = false;
-		this.edgeThickness = 1.0;
-		this.edgeStrength = 3.0;
+		this.edgeThickness = 3.0;
+		this.edgeStrength = 8.0;
 		this.downSampleRatio = 2;
 		this.pulsePeriod = 0;
 
@@ -49,10 +52,6 @@ class OutlinePass extends Pass {
 		this.depthMaterial.side = DoubleSide;
 		this.depthMaterial.depthPacking = RGBADepthPacking;
 		this.depthMaterial.blending = NoBlending;
-
-		this.prepareMaskMaterial = this.getPrepareAlphaMaterial();
-		this.prepareMaskMaterial.side = DoubleSide;
-		this.prepareMaskMaterial.fragmentShader = replaceDepthToViewZ( this.prepareMaskMaterial.fragmentShader, this.renderCamera );
 
 		this.renderTargetDepthBuffer = new WebGLRenderTarget( this.resolution.x, this.resolution.y );
 		this.renderTargetDepthBuffer.texture.name = 'OutlinePass.depth';
@@ -316,13 +315,11 @@ class OutlinePass extends Pass {
 			this.fsQuad.render( renderer );
 
 			this.tempPulseColor1.copy( this.visibleEdgeColor );
-			this.tempPulseColor2.copy( this.hiddenEdgeColor );
 
 			if ( this.pulsePeriod > 0 ) {
 
 				const scalar = ( 1 + 0.25 ) / 2 + Math.cos( performance.now() * 0.01 / this.pulsePeriod ) * ( 1.0 - 0.25 ) / 2;
 				this.tempPulseColor1.multiplyScalar( scalar );
-				this.tempPulseColor2.multiplyScalar( scalar );
 
 			}
 
@@ -331,7 +328,6 @@ class OutlinePass extends Pass {
 			this.edgeDetectionMaterial.uniforms[ 'maskTexture' ].value = this.renderTargetMaskDownSampleBuffer.texture;
 			this.edgeDetectionMaterial.uniforms[ 'texSize' ].value.set( this.renderTargetMaskDownSampleBuffer.width, this.renderTargetMaskDownSampleBuffer.height );
 			this.edgeDetectionMaterial.uniforms[ 'visibleEdgeColor' ].value = this.tempPulseColor1;
-			this.edgeDetectionMaterial.uniforms[ 'hiddenEdgeColor' ].value = this.tempPulseColor2;
 			renderer.setRenderTarget( this.renderTargetEdgeBuffer1 );
 			renderer.clear();
 			this.fsQuad.render( renderer );
@@ -395,57 +391,6 @@ class OutlinePass extends Pass {
 
 	}
 
-	getPrepareMaskMaterial() {
-
-		return new ShaderMaterial( {
-
-			uniforms: {
-				'depthTexture': { value: null },
-				'cameraNearFar': { value: new Vector2( 0.5, 0.5 ) },
-				'textureMatrix': { value: null }
-			},
-
-			vertexShader:
-				`#include <morphtarget_pars_vertex>
-				#include <skinning_pars_vertex>
-
-				varying vec4 projTexCoord;
-				varying vec4 vPosition;
-				uniform mat4 textureMatrix;
-
-				void main() {
-
-					#include <skinbase_vertex>
-					#include <begin_vertex>
-					#include <morphtarget_vertex>
-					#include <skinning_vertex>
-					#include <project_vertex>
-
-					vPosition = mvPosition;
-					vec4 worldPosition = modelMatrix * vec4( transformed, 1.0 );
-					projTexCoord = textureMatrix * worldPosition;
-
-				}`,
-
-			fragmentShader:
-				`#include <packing>
-				varying vec4 vPosition;
-				varying vec4 projTexCoord;
-				uniform sampler2D depthTexture;
-				uniform vec2 cameraNearFar;
-
-				void main() {
-
-					float depth = unpackRGBAToDepth(texture2DProj( depthTexture, projTexCoord ));
-					float viewZ = - DEPTH_TO_VIEW_Z( depth, cameraNearFar.x, cameraNearFar.y );
-					float depthTest = (-vPosition.z > viewZ) ? 1.0 : 0.0;
-					gl_FragColor = vec4(0.0, depthTest, 1.0, 1.0);
-
-				}`
-
-		} );
-
-	}
 	getPrepareAlphaMaterial() {
 
 		return new ShaderMaterial( {
@@ -504,8 +449,7 @@ class OutlinePass extends Pass {
 			uniforms: {
 				'maskTexture': { value: null },
 				'texSize': { value: new Vector2( 0.5, 0.5 ) },
-				'visibleEdgeColor': { value: new Vector3( 1.0, 1.0, 1.0 ) },
-				'hiddenEdgeColor': { value: new Vector3( 1.0, 1.0, 1.0 ) },
+				'visibleEdgeColor': { value: new Vector3( 1.0, 0.0, 0.0 ) }
 			},
 
 			vertexShader:
@@ -522,11 +466,11 @@ class OutlinePass extends Pass {
 				uniform sampler2D maskTexture;
 				uniform vec2 texSize;
 				uniform vec3 visibleEdgeColor;
-				uniform vec3 hiddenEdgeColor;
 
 				void main() {
 					vec2 invSize = 1.0 / texSize;
 					vec4 uvOffset = vec4(1.0, 0.0, 0.0, 1.0) * vec4(invSize, invSize);
+					vec4 c = texture2D( maskTexture, vUv);
 					vec4 c1 = texture2D( maskTexture, vUv + uvOffset.xy);
 					vec4 c2 = texture2D( maskTexture, vUv - uvOffset.xy);
 					vec4 c3 = texture2D( maskTexture, vUv + uvOffset.yw);
@@ -534,11 +478,10 @@ class OutlinePass extends Pass {
 					float diff1 = (c1.a - c2.a)*0.5;
 					float diff2 = (c3.a - c4.a)*0.5;
 					float d = length( vec2(diff1, diff2) );
-					float a1 = min(c1.g, c2.g);
-					float a2 = min(c3.g, c4.g);
-					float visibilityFactor = min(a1, a2);
-					vec3 edgeColor = 1.0 - visibilityFactor > 0.001 ? visibleEdgeColor : hiddenEdgeColor;
-					gl_FragColor = vec4(edgeColor, 1.0) * vec4(d);
+					float a1 = min(c1.a, c2.a);
+					float a2 = min(c3.a, c4.a);
+					vec3 edgeColor = visibleEdgeColor;
+					gl_FragColor = vec4(edgeColor, d/2.0);
 				}`
 		} );
 
@@ -583,7 +526,8 @@ class OutlinePass extends Pass {
 					vec2 invSize = 1.0 / texSize;
 					float sigma = kernelRadius/2.0;
 					float weightSum = gaussianPdf(0.0, sigma);
-					vec4 diffuseSum = texture2D( colorTexture, vUv) * weightSum;
+					vec4 c = texture2D( colorTexture, vUv);
+					vec4 diffuseSum = c * weightSum;
 					vec2 delta = direction * invSize * kernelRadius/float(MAX_RADIUS);
 					vec2 uvOffset = delta;
 					for( int i = 1; i <= MAX_RADIUS; i ++ ) {
@@ -595,8 +539,7 @@ class OutlinePass extends Pass {
 						weightSum += (2.0 * w);
 						uvOffset += delta;
 					}
-					gl_FragColor = diffuseSum/weightSum;
-					gl_FragColor.a = 0.0;???
+					gl_FragColor = diffuseSum/weightSum * (1.0 - c.a);
 				}`
 		} );
 
@@ -639,19 +582,16 @@ class OutlinePass extends Pass {
 					vec4 edgeValue1 = texture2D(edgeTexture1, vUv);
 					vec4 edgeValue2 = texture2D(edgeTexture2, vUv);
 					vec4 maskColor = texture2D(maskTexture, vUv);
-					vec4 patternColor = texture2D(patternTexture, 6.0 * vUv);
-					float visibilityFactor = 1.0 - maskColor.g > 0.0 ? 1.0 : 0.5;
-					vec4 edgeValue = edgeValue1 + edgeValue2 * edgeGlow;
-					vec4 finalColor = edgeStrength * maskColor.r * edgeValue;
+					vec4 edgeValue = vec4(step(0.1,edgeValue1.rgb),step(0.1/edgeStrength,edgeValue1.a));
+					vec4 glowValue =  edgeValue2 * edgeGlow;
+					edgeValue += vec4(glowValue.rgb, glowValue.a*(1.0-step(0.01,maskColor.a)));
 
-					if(usePatternTexture)
-						finalColor += + visibilityFactor * (1.0 - maskColor.r) * (1.0 - patternColor.r);
-					gl_FragColor = finalColor;
+					gl_FragColor = edgeValue;//vec4(finalColor,edgeValue.a);
 				}`,
-			blending: AdditiveBlending,
+			//blending: CustomBlending,
 			depthTest: false,
 			depthWrite: false,
-			transparent: true
+			transparent: true,
 		} );
 
 	}
